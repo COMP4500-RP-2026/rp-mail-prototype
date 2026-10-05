@@ -1,4 +1,4 @@
-"""Personal RP+ mail workspace, Windows desktop UI."""
+"""Personal RP+ mail workspace for Windows and macOS."""
 import csv
 import io
 import json
@@ -18,7 +18,16 @@ import rp_mailer as core
 import email_lookup
 from localization import tr, set_language, DisplayVar
 
-HOME = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
+def app_home():
+    if '--self-check' in sys.argv and sys.argv.index('--self-check') + 1 < len(sys.argv):
+        return Path(sys.argv[sys.argv.index('--self-check') + 1]).resolve().parent / 'rpmail-self-check-data'
+    if getattr(sys, 'frozen', False):
+        if sys.platform == 'darwin':
+            return Path.home() / 'Library' / 'Application Support' / 'RPMail'
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent
+
+HOME = app_home()
 core.BASE = HOME
 DATA = HOME / 'personal_data'
 LABELS = {
@@ -83,11 +92,17 @@ class App(tk.Tk):
         self.lookup_stop = threading.Event()
         self.filter = '全部记录'
         self.vars = {}
-        self.settings = dict(transport='outlook', sender_name='', sender_email='', reply_to='', delay_seconds=2, language='en')
-        DATA.mkdir(exist_ok=True)
+        self.settings = dict(transport='outlook' if sys.platform == 'win32' else 'smtp',
+                             sender_name='', sender_email='', reply_to='', delay_seconds=2,
+                             smtp_host='smtp.office365.com', smtp_port='587', smtp_security='starttls',
+                             smtp_username='', auth_mode='microsoft', tenant_id='', client_id='',
+                             password_env='RP_MAIL_SMTP_PASSWORD', language='en')
+        DATA.mkdir(parents=True, exist_ok=True)
         config = DATA / 'settings.json'
         if config.exists():
             self.settings.update(json.loads(config.read_text(encoding='utf-8')))
+        if sys.platform == 'darwin' and self.settings.get('transport') == 'outlook':
+            self.settings['transport'] = 'smtp'
         set_language(self.settings.get('language','en'))
         self.title(tr('RP Mail · 个人研究确认'))
         self.style_ui()
@@ -127,7 +142,7 @@ class App(tk.Tk):
         toolbar = ttk.Frame(self, padding=(16, 12))
         toolbar.pack(fill='x')
         for title, command, primary in [('导入表格', self.import_file, True), ('自动查找邮箱', self.find_emails, True), ('导出清单', self.export, False),
-                ('个人邮箱设置', self.account_settings, False), ('检查 Outlook', self.check_outlook, False)]:
+                ('个人邮箱设置', self.account_settings, False), ('检查发件连接', self.check_connection, False)]:
             ttk.Button(toolbar, text=tr(title), command=command, style='Primary.TButton' if primary else 'TButton').pack(side='left', padx=4)
         self.stop_button=ttk.Button(toolbar,text=tr('停止查找'),command=self.lookup_stop.set,state='disabled')
         self.stop_button.pack(side='left',padx=4)
@@ -142,7 +157,7 @@ class App(tk.Tk):
         for name in ['全部记录','待补充','可发送','已存草稿','已提交','结果待核查']:
             tk.Button(sidebar, text=tr(name), anchor='w', bg='#edf2f8', fg='#253248', activebackground='#dcecff', relief='flat',
                       font=('Microsoft YaHei UI', 11), padx=20, pady=12, command=lambda n=name:self.set_filter(n)).pack(fill='x')
-        tk.Label(sidebar, text=tr('以个人身份联系\n使用自己的邮箱\n回复在 Outlook 查看'), bg='#edf2f8', fg='#66768b', justify='left', font=('Microsoft YaHei UI', 9)).pack(side='bottom', padx=12, pady=22)
+        tk.Label(sidebar, text=tr('以个人身份联系\n使用自己的邮箱\n回复在邮箱中查看'), bg='#edf2f8', fg='#66768b', justify='left', font=('Microsoft YaHei UI', 9)).pack(side='bottom', padx=12, pady=22)
         pane = ttk.Panedwindow(body, orient='horizontal'); pane.pack(fill='both', expand=True, padx=(0,14))
         left = ttk.Frame(pane, padding=12); right = ttk.Frame(pane, padding=12)
         pane.add(left, weight=3); pane.add(right, weight=4)
@@ -161,6 +176,7 @@ class App(tk.Tk):
         self.action_buttons=[]
         for title, command in [('试发给自己',lambda:self.dispatch('test')),('生成草稿',lambda:self.dispatch('draft')),('发送选中项',lambda:self.dispatch('send'))]:
             b=ttk.Button(actions,text=tr(title),command=command,style='Primary.TButton' if '发送' in title else 'TButton');b.pack(side='left',padx=3);self.action_buttons.append(b)
+            if title == '生成草稿':self.draft_button=b
         tabs=ttk.Notebook(right);tabs.pack(fill='both',expand=True)
         edit=ttk.Frame(tabs,padding=14); view=ttk.Frame(tabs,padding=14); contacts=ttk.Frame(tabs,padding=14)
         tabs.add(edit,text=tr('收件人和研究信息'));tabs.add(view,text=tr('邮件预览'))
@@ -237,6 +253,7 @@ class App(tk.Tk):
 
     def update_account_label(self):
         self.account_label.config(text=tr(self.settings.get('sender_email') or '尚未设置个人邮箱'))
+        self.draft_button.config(state='normal' if self.settings.get('transport') == 'outlook' else 'disabled')
 
     def read_history(self):
         self.history={}
@@ -347,12 +364,12 @@ class App(tk.Tk):
         selected=[int(i) for i in self.tree.selection()]
         indices=selected or [i for i,r in enumerate(self.rows) if not r.get('researcher_email') and r.get('already_in_relations','').lower() not in ('true','1','yes')]
         if not indices:messagebox.showinfo(tr('无需查找'),tr('没有选中记录，也没有缺少邮箱的记录。'));return
-        if len(indices)>20 and not messagebox.askyesno(tr('批量读取公开网页'),tr(f'将查找 {len(indices)} 条记录。软件会打开 Edge 读取项目和个人主页，并缓存重复页面。\n可随时点击“停止查找”，已完成的结果会保留。继续？')):return
+        if len(indices)>20 and not messagebox.askyesno(tr('批量读取公开网页'),tr(f'将查找 {len(indices)} 条记录。软件会打开浏览器读取项目和个人主页，并缓存重复页面。\n可随时点击“停止查找”，已完成的结果会保留。继续？')):return
         self.lookup_stop.clear();self.busy=True
         for w in self.edit_controls:w.configure(state='disabled')
         self.stop_button.config(state='normal')
         for b in self.action_buttons:b.config(state='disabled')
-        self.status.set('正在打开 Edge 查找公开邮箱… 无需邮箱登录，不会发送邮件。')
+        self.status.set('正在打开浏览器查找公开邮箱… 无需邮箱登录，不会发送邮件。')
         jobs=[(i,dict(self.rows[i])) for i in indices]
         threading.Thread(target=self.lookup_worker,args=(jobs,),daemon=True).start()
 
@@ -408,24 +425,65 @@ class App(tk.Tk):
 
     def account_settings(self):
         if self.busy:return
-        win=tk.Toplevel(self);win.title(tr('个人邮箱设置'));win.geometry(f'{self.px(650)}x{self.px(460)}');win.transient(self);win.grab_set()
-        frame=ttk.Frame(win,padding=24);frame.pack(fill='both',expand=True)
-        ttk.Label(frame,text=tr('使用 Outlook 中已登录的个人邮箱'),font=('Microsoft YaHei UI',14,'bold')).pack(anchor='w',pady=(0,12))
-        ttk.Label(frame,text=tr('支持 Windows 经典版 Outlook。不会索取或保存邮箱密码。'),wraplength=510).pack(anchor='w',pady=(0,14))
+        win=tk.Toplevel(self);win.title(tr('个人邮箱设置'));win.geometry(f'{self.px(680)}x{self.px(700)}');win.transient(self);win.grab_set()
+        frame=ttk.Frame(win,padding=20);frame.pack(fill='both',expand=True)
+        ttk.Label(frame,text=tr('选择发信方式并配置已获准使用的个人邮箱'),font=('Microsoft YaHei UI',13,'bold')).pack(anchor='w',pady=(0,10))
+        ttk.Label(frame,text=tr('Windows 可使用经典版 Outlook；macOS 和 Windows 均可使用 SMTP。软件不保存邮箱密码。'),wraplength=600).pack(anchor='w',pady=(0,10))
+        ttk.Label(frame,text=tr('发信方式')).pack(anchor='w')
+        methods={'Classic Outlook (Windows)':'outlook','SMTP (macOS / Windows)':'smtp'}
+        choices=list(methods) if sys.platform=='win32' else ['SMTP (macOS / Windows)']
+        method=tk.StringVar(value=next(label for label,value in methods.items() if value==self.settings.get('transport','smtp')))
+        method_select=ttk.Combobox(frame,textvariable=method,values=choices,state='readonly')
+        method_select.pack(fill='x',pady=(4,10))
         values={}
         for key,label in [('sender_name','你的姓名（英文署名）'),('sender_email','个人发件邮箱'),('reply_to','回复邮箱（可留空）')]:
             ttk.Label(frame,text=tr(label)).pack(anchor='w')
             values[key]=tk.StringVar(value=self.settings.get(key,''));ttk.Entry(frame,textvariable=values[key]).pack(fill='x',pady=(4,10))
+        smtp_frame=ttk.Frame(frame)
+        for key,label in [('smtp_host','SMTP 服务器'),('smtp_port','SMTP 端口'),('smtp_username','SMTP 登录邮箱')]:
+            ttk.Label(smtp_frame,text=tr(label)).pack(anchor='w')
+            values[key]=tk.StringVar(value=self.settings.get(key,''));ttk.Entry(smtp_frame,textvariable=values[key]).pack(fill='x',pady=(3,7))
+        ttk.Label(smtp_frame,text=tr('连接安全')).pack(anchor='w')
+        security=tk.StringVar(value=self.settings.get('smtp_security','starttls'))
+        ttk.Combobox(smtp_frame,textvariable=security,values=('starttls','ssl'),state='readonly').pack(fill='x',pady=(3,7))
+        ttk.Label(smtp_frame,text=tr('登录方式')).pack(anchor='w')
+        auth_methods={'Microsoft sign-in':'microsoft','Password environment variable':'password'}
+        auth=tk.StringVar(value=next(label for label,value in auth_methods.items() if value==self.settings.get('auth_mode','microsoft')))
+        auth_select=ttk.Combobox(smtp_frame,textvariable=auth,values=list(auth_methods),state='readonly')
+        auth_select.pack(fill='x',pady=(3,7))
+        auth_frame=ttk.Frame(smtp_frame)
+        auth_frame.pack(fill='x')
+        auth_entries={}
+        for key,label in [('tenant_id','Microsoft 租户 ID'),('client_id','Microsoft 应用 ID'),('password_env','密码环境变量名称')]:
+            block=ttk.Frame(auth_frame)
+            ttk.Label(block,text=tr(label)).pack(anchor='w')
+            values[key]=tk.StringVar(value=self.settings.get(key,''))
+            ttk.Entry(block,textvariable=values[key]).pack(fill='x',pady=(3,7))
+            auth_entries[key]=block
+        def show_auth(*_):
+            for block in auth_entries.values():block.pack_forget()
+            keys=('tenant_id','client_id') if auth_methods[auth.get()]=='microsoft' else ('password_env',)
+            for key in keys:auth_entries[key].pack(fill='x')
+        def show_smtp(*_):
+            if methods[method.get()]=='smtp':smtp_frame.pack(fill='x',pady=(0,8),before=save_button)
+            else:smtp_frame.pack_forget()
+        auth_select.bind('<<ComboboxSelected>>',show_auth)
+        method_select.bind('<<ComboboxSelected>>',show_smtp)
         def save():
             candidate=dict(self.settings);candidate.update({k:v.get().strip() for k,v in values.items()})
-            try:core.validate_config(candidate,True)
+            candidate.update(transport=methods[method.get()],smtp_security=security.get(),auth_mode=auth_methods[auth.get()])
+            if candidate['transport']=='smtp' and not candidate['smtp_username']:
+                candidate['smtp_username']=candidate['sender_email']
+            try:core.validate_config(candidate)
             except Exception as exc:messagebox.showerror(tr('请检查填写内容'),tr(str(exc)),parent=win);return
             self.settings=candidate
             (DATA/'settings.json').write_text(json.dumps(candidate,ensure_ascii=False,indent=2),encoding='utf-8')
             self.update_account_label();self.render_preview();win.destroy()
-        ttk.Button(frame,text=tr('保存个人邮箱'),command=save,style='Primary.TButton').pack(anchor='e')
+        save_button=ttk.Button(frame,text=tr('保存个人邮箱'),command=save,style='Primary.TButton')
+        save_button.pack(anchor='e')
+        show_auth();show_smtp()
 
-    def check_outlook(self):
+    def check_connection(self):
         if self.busy:return
         try:core.validate_config(self.settings,True)
         except Exception as exc:messagebox.showerror(tr('先设置个人邮箱'),tr(str(exc)));return
@@ -433,6 +491,9 @@ class App(tk.Tk):
 
     def dispatch(self,command):
         if self.busy:return
+        if command=='draft' and self.settings.get('transport')!='outlook':
+            messagebox.showinfo(tr('生成草稿'),tr('SMTP 不支持 Outlook 草稿；可以先试发给自己。'))
+            return
         self.save_current(refresh=False)
         selected=list(self.tree.selection())
         if not selected:messagebox.showinfo(tr('选择记录'),tr('请先选择左侧需要处理的记录。'));return
@@ -459,29 +520,34 @@ class App(tk.Tk):
     def start_worker(self,command,rows,config):
         self.busy=True
         for w in self.edit_controls:w.configure(state='disabled')
-        self.status.set('正在处理… 请保持 Outlook 打开，等待结果。')
+        self.status.set('正在处理… 请保持应用打开，等待结果。')
         for b in self.action_buttons:b.config(state='disabled')
         threading.Thread(target=self.worker,args=(command,rows,config),daemon=True).start()
+
+    def auth_prompt(self,uri,code):
+        self.events.put(('auth',(uri,code)))
 
     def worker(self,command,rows,config):
         com=None
         try:
-            import pythoncom
-            com=pythoncom;com.CoInitialize()
+            if config.get('transport')=='outlook':
+                import pythoncom
+                com=pythoncom;com.CoInitialize()
             if command=='check':
-                with core.OutlookTransport(config):pass
-                self.events.put(('ok','已连接经典版 Outlook，并找到指定个人邮箱。未创建或发送邮件。'))
+                with core.connect(config,on_auth=self.auth_prompt):pass
+                result='已连接经典版 Outlook，并找到指定个人邮箱。未创建或发送邮件。' if config.get('transport')=='outlook' else 'SMTP 登录与连接成功。未发送邮件。'
+                self.events.put(('ok',result))
                 return
             save_table(DATA/'batch.csv',self.fields,rows)
             config_path=DATA/'batch_config.json'
             config_path.write_text(json.dumps(config),encoding='utf-8')
             args=SimpleNamespace(command=command,input=DATA/'batch.csv',config=config_path,output=DATA/'validation',limit=len(rows),to=config['sender_email'])
             log=io.StringIO()
-            with redirect_stdout(log):core.run(args)
+            with redirect_stdout(log):core.run(args,on_auth=self.auth_prompt)
             (DATA/'last_operation.txt').write_text(log.getvalue(),encoding='utf-8')
-            text={'test':'已将 1 封测试邮件交给 Outlook，收件人为你自己的邮箱。',
+            text={'test':'已将 1 封测试邮件交给发件服务，收件人为你自己的邮箱。',
                   'draft':'草稿处理完成，请在 Outlook 草稿箱中检查并手动发送。',
-                  'send':'选中邮件处理完成，请在 Outlook 中检查发件箱、已发送和退信。'}[command]
+                  'send':'选中邮件处理完成，请在邮箱中检查已发送、退信和回复。'}[command]
             self.events.put(('ok',text))
         except Exception as exc:self.events.put(('error',str(exc)))
         finally:
@@ -490,6 +556,11 @@ class App(tk.Tk):
     def poll(self):
         try:
             kind,text=self.events.get_nowait()
+            if kind=='auth':
+                uri,code=text
+                webbrowser.open(uri)
+                messagebox.showinfo(tr('Microsoft 登录'),tr(f'请在打开的网页输入代码 {code} 完成登录。\n\n登录网址：{uri}'))
+                self.after(100,self.poll);return
             if kind=='lookup_progress':
                 self.status.set(text)
                 self.after(100,self.poll);return
@@ -506,6 +577,7 @@ class App(tk.Tk):
             for w in self.edit_controls:w.configure(state='normal')
             self.stop_button.config(state='disabled')
             for b in self.action_buttons:b.config(state='normal')
+            self.update_account_label()
             self.refresh();self.render_preview();self.status.set(text)
             if kind=='error':messagebox.showerror(tr('操作未完成'),tr(text+'\n\n若已开始处理邮件，请先检查 Outlook，再决定是否重试。'))
             else:messagebox.showinfo(tr('处理结果'),tr(text))
@@ -527,10 +599,16 @@ if __name__=='__main__':
         app.withdraw()
         def self_check():
             try:
-                import openpyxl, win32com.client, pythoncom
+                import openpyxl, msal
                 from playwright.sync_api import sync_playwright
+                if sys.platform == 'win32':
+                    import win32com.client, pythoncom
                 with sync_playwright():pass
-                report={'startup':'ok','rows':len(app.rows),'widgets':len(app.vars),'excel':'available','outlook_adapter':'available','browser_driver':'available','emails_sent':0}
+                with email_lookup.BrowserFetcher() as browser:
+                    browser_version=browser.browser.version
+                report={'startup':'ok','rows':len(app.rows),'widgets':len(app.vars),'excel':'available',
+                        'smtp_adapter':'available','outlook_adapter':'available' if sys.platform=='win32' else 'not applicable',
+                        'browser_driver':'available','browser_version':browser_version,'emails_sent':0}
                 Path(sys.argv[sys.argv.index('--self-check')+1]).write_text(json.dumps(report),encoding='utf-8')
             finally:app.destroy()
         app.after(200,self_check)

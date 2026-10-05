@@ -1,6 +1,6 @@
 # RP Mail - Experimental Prototype
 
-An experimental Windows desktop prototype exploring how to review potential relationships between research projects and research outputs in Research Portal+ (RP+), and contacting researchers from a personal email account.
+An experimental Windows and macOS desktop prototype exploring how to review potential relationships between research projects and research outputs in Research Portal+ (RP+), and contacting researchers from a personal email account.
 
 **Status: Experimental prototype - work in progress.**
 
@@ -13,7 +13,7 @@ This repository is an early attempt to explore the workflow. It is not a complet
 - Import CSV or Excel (.xlsx) files, edit records, and preview confirmation emails.
 - Find publicly listed email addresses through researcher profiles linked from RP+ project pages.
 - Prefer contacts whose profile links appear on both the project and publication pages. Retain alternative contacts, source URLs, and lookup timestamps.
-- Send a test email, create drafts, or send selected records through a personal account in classic Outlook for Windows.
+- Send a test email or selected records through SMTP on Windows or macOS. Classic Outlook for Windows remains available for drafts and sending.
 - Track drafts and submissions locally to prevent duplicate processing.
 - Retry page timeouts once and continue after individual page failures. Stop on access restrictions, rate limits, or verification pages.
 
@@ -21,14 +21,18 @@ Finding an email address does not confirm a research relationship. Records must 
 
 ## Requirements
 
-- Windows 64-bit
+- Windows 64-bit or macOS
 - Python 3.10+ when running from source
-- Microsoft Edge for public email lookup
-- **Classic Outlook for Windows**, with the personal sending account configured
+- Microsoft Edge, Google Chrome, or Playwright Chromium for public email lookup
+- A permitted SMTP account for cross-platform sending, or **Classic Outlook for Windows** with the personal sending account configured
 
-New Outlook is not supported by the current sending integration. The application uses Outlook's existing account session and does not ask for or store your email password.
+New Outlook is not supported by the Windows COM integration. The SMTP path works independently of Outlook. The application does not store an email password: it uses Microsoft device sign-in with an approved application registration, or a password supplied through an environment variable when the mail provider permits it.
 
 ## Getting Started
+
+Platform guides: [Windows desktop guide](docs/桌面软件使用说明.md) · [macOS guide](docs/macOS使用说明.md).
+
+Windows:
 
 ```powershell
 python -m venv .venv
@@ -36,13 +40,25 @@ python -m venv .venv
 .venv\Scripts\python desktop_app.py
 ```
 
-No separate Playwright browser download is required; the application uses the installed Microsoft Edge browser.
+macOS:
 
-1. Enter your name and personal sending address in the account settings.
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python desktop_app.py
+```
+
+If Edge or Chrome is installed, no separate Playwright browser download is required. Otherwise run `.venv/bin/python -m playwright install chromium` on macOS, or the equivalent `.venv\Scripts\python -m playwright install chromium` on Windows.
+
+1. Enter your name and personal sending address in the account settings. Choose **SMTP** on macOS; Windows can also choose **Classic Outlook**.
 2. Import your research data and select records.
 3. Run the email lookup and review the suggested contacts and sources.
 4. Check the relationship evidence and email preview.
-5. Send a test email to yourself before creating drafts or sending reviewed records.
+5. Check the sending connection and send a test email to yourself before sending reviewed records. Outlook drafts are available only with the Windows Outlook method.
+
+For Microsoft 365 SMTP, ask the mailbox administrator for an approved public-client application ID and tenant ID, and whether SMTP AUTH is allowed for the mailbox. Enter these in the SMTP account settings. Device sign-in displays a code and opens the Microsoft sign-in page. The default server settings are `smtp.office365.com`, port `587`, and STARTTLS; use your provider's settings for another service. A successful SMTP submission does not prove delivery.
+
+For password-based SMTP, set the named environment variable before starting the app. A Finder-launched macOS app does not inherit Terminal-only environment variables, so Microsoft sign-in is the practical choice for that launch method. Do not put passwords in `settings.json`.
 
 The desktop interface defaults to English. Use the **English / 中文** selector in the top bar to switch languages. Your preference is saved; records and edits are retained when switching. Researcher-facing emails remain in English and use a personal sender's voice.
 
@@ -62,29 +78,37 @@ The repository excludes real research datasets, personal account settings, colle
 
 ## Testing
 
-```powershell
-.venv\Scripts\python tests/run_tests.py
-```
+Run `.venv\Scripts\python tests/run_tests.py` on Windows or `.venv/bin/python tests/run_tests.py` on macOS.
 
 Automated checks use temporary data and simulated sending. They do not contact researchers or access RP+. The desktop test briefly opens a Tk window.
 
 A live lookup was verified in the packaged Windows application: one project record returned three publicly listed contact emails and saved the results. This does not establish full-dataset coverage or verify email delivery.
 
-## Building the Windows Application
+## Building the Desktop Application
+
+Windows:
 
 ```powershell
 .venv\Scripts\python -m pip install -r requirements-dev.txt
 .venv\Scripts\python -m PyInstaller --noconfirm RPMail.spec
 ```
 
-Run `dist/RPMail/RPMail.exe` and keep its adjacent `_internal` folder. The packaged application does not require a separate Python installation.
+macOS:
+
+```sh
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m PyInstaller --noconfirm RPMail.spec
+```
+
+Run `dist/RPMail/RPMail.exe` on Windows or `dist/RPMail.app` on macOS. Build separately on each operating system. Keep the Windows `_internal` folder beside the executable. Windows data remains beside the executable; the macOS app stores settings, working records and send history in `~/Library/Application Support/RPMail/` so an installed app bundle stays read-only.
 
 ## Current Limitations
 
 - No inbox synchronization, automatic reply classification, or RP+ updates.
 - Researchers without linked public profiles or published email addresses need manual contact details.
 - Multiple relationships produce separate emails; grouping by researcher is not implemented.
-- Generated drafts must be sent manually in Outlook. Later automatic sends skip those records.
-- Submission to Outlook does not guarantee delivery. Check the Outbox, Sent Items, and bounce messages.
+- Generated Outlook drafts must be sent manually. Later automatic sends skip those records. SMTP has no Outlook-draft feature.
+- Submission to Outlook or SMTP does not guarantee delivery. Check Sent Items and bounce messages.
+- Microsoft 365 SMTP requires tenant/app consent and mailbox policy to permit SMTP AUTH; some institutional accounts will not allow this route.
 - Website changes, network conditions, and Outlook account policies can affect lookup and sending.
 - The application does not bypass website access restrictions or verification challenges.

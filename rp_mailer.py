@@ -1,4 +1,4 @@
-"""RP+ confirmation mailer. Python 3.10+; Outlook desktop uses pywin32."""
+"""RP+ confirmation mailer. Python 3.10+; Outlook or cross-platform SMTP."""
 import argparse
 from contextlib import closing
 import csv
@@ -67,6 +67,8 @@ def validate_config(config, sending=False):
             raise ValueError(f'Configure {field} in config.json')
     if not address(config['sender_email']) or (config.get('reply_to') and not address(config['reply_to'])):
         raise ValueError('Invalid sender_email or reply_to')
+    if config.get('transport', 'smtp') not in ('outlook', 'smtp'):
+        raise ValueError('transport must be outlook or smtp')
     if sending:
         if float(config.get('delay_seconds', 2)) < 0:
             raise ValueError('delay_seconds cannot be negative')
@@ -74,6 +76,12 @@ def validate_config(config, sending=False):
             return
         if not config.get('smtp_host') or not config.get('smtp_username'):
             raise ValueError('Configure smtp_host and smtp_username')
+        try:
+            port = int(config.get('smtp_port', ''))
+        except (TypeError, ValueError):
+            raise ValueError('smtp_port must be between 1 and 65535')
+        if not 1 <= port <= 65535:
+            raise ValueError('smtp_port must be between 1 and 65535')
         if config.get('smtp_security') not in ('starttls', 'ssl'):
             raise ValueError('smtp_security must be starttls or ssl')
         if config.get('auth_mode') == 'microsoft':
@@ -82,10 +90,8 @@ def validate_config(config, sending=False):
                     raise ValueError(f'Ask institution IT to configure {field}')
         elif config.get('auth_mode') != 'password':
             raise ValueError('auth_mode must be microsoft or password')
-        elif not os.environ.get(config['password_env']):
-            raise ValueError(f'Set environment variable {config["password_env"]}')
-        if float(config.get('delay_seconds', 2)) < 0:
-            raise ValueError('delay_seconds cannot be negative')
+        elif not config.get('password_env') or not os.environ.get(config['password_env']):
+            raise ValueError('Set the configured password environment variable')
 
 def message(row, config):
     ref = key_for(row)[:16]
@@ -184,9 +190,28 @@ class OutlookTransport:
     def __exit__(self, *args):
         self.close()
 
-def connect(config):
+def connect(config, on_auth=None):
     if config.get('transport') == 'outlook':
         return OutlookTransport(config)
+    token = None
+    if config.get('auth_mode') == 'microsoft':
+        try:
+            import msal
+        except ImportError:
+            raise ValueError('Install Microsoft login dependency: python -m pip install msal')
+        app = msal.PublicClientApplication(config['client_id'],
+            authority='https://login.microsoftonline.com/' + config['tenant_id'])
+        flow = app.initiate_device_flow(scopes=['https://outlook.office.com/SMTP.Send'])
+        if 'user_code' not in flow:
+            raise ValueError('Microsoft sign-in could not start. Check application configuration with IT.')
+        if on_auth:
+            on_auth(flow['verification_uri'], flow['user_code'])
+        else:
+            print(flow['message'], flush=True)
+        result = app.acquire_token_by_device_flow(flow)
+        token = result.get('access_token')
+        if not token:
+            raise ValueError('Microsoft sign-in failed. Check consent and school access policy.')
     context = ssl.create_default_context()
     if config['smtp_security'] == 'ssl':
         smtp = smtplib.SMTP_SSL(config['smtp_host'], int(config['smtp_port']), timeout=30, context=context)
@@ -197,20 +222,7 @@ def connect(config):
         smtp.ehlo()
     try:
         if config.get('auth_mode') == 'microsoft':
-            try:
-                import msal
-            except ImportError:
-                raise ValueError('Install Microsoft login dependency: python -m pip install msal')
-            app = msal.PublicClientApplication(config['client_id'],
-                authority='https://login.microsoftonline.com/' + config['tenant_id'])
-            flow = app.initiate_device_flow(scopes=['https://outlook.office.com/SMTP.Send'])
-            if 'user_code' not in flow:
-                raise ValueError('Microsoft sign-in could not start. Check application configuration with IT.')
-            print(flow['message'], flush=True)
-            result = app.acquire_token_by_device_flow(flow)
-            if 'access_token' not in result:
-                raise ValueError('Microsoft sign-in failed. Check consent and school access policy.')
-            auth = f'user={config["smtp_username"]}\x01auth=Bearer {result["access_token"]}\x01\x01'
+            auth = f'user={config["smtp_username"]}\x01auth=Bearer {token}\x01\x01'
             smtp.auth('XOAUTH2', lambda challenge=None: auth if challenge is None else '')
         else:
             smtp.login(config['smtp_username'], os.environ[config['password_env']])
@@ -219,7 +231,7 @@ def connect(config):
         raise
     return smtp
 
-def run(args):
+def run(args, on_auth=None):
     _, rows = read_rows(args.input)
     config = json.loads(Path(args.config).read_text(encoding='utf-8-sig'))
     validate_config(config, args.command in ('send', 'test', 'draft'))
@@ -257,7 +269,7 @@ def run(args):
         msg = message(eligible[0], config)
         msg.replace_header('To', args.to)
         msg.replace_header('Subject', '[TEST] ' + str(msg['Subject']))
-        with connect(config) as smtp:
+        with connect(config, on_auth=on_auth) as smtp:
             smtp.send_message(msg, from_addr=config['sender_email'], to_addrs=[args.to])
         print('One test message sent. Production history unchanged.')
         return
@@ -278,7 +290,7 @@ def run(args):
                     continue
                 msg = message(row, config)
                 if smtp is None:
-                    smtp = connect(config)
+                    smtp = connect(config, on_auth=on_auth)
                 try:
                     db.execute('INSERT INTO history VALUES (?, ?, ?, ?, ?)',
                                (key, row['researcher_email'], 'pending', datetime.now(timezone.utc).isoformat(), str(msg['Message-ID'])))

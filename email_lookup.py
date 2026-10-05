@@ -73,7 +73,7 @@ def display_name(name):
     return name
 
 class BrowserFetcher:
-    """Use an ordinary visible Edge window; no saved credentials or bypasses."""
+    """Use an ordinary visible browser; no saved credentials or bypasses."""
     def __init__(self,stop=None,report=None):
         self.stop=stop;self.report=report or (lambda _:None)
 
@@ -81,12 +81,23 @@ class BrowserFetcher:
         from playwright.sync_api import sync_playwright
         self.runtime=sync_playwright().start()
         try:
-            self.browser=self.runtime.chromium.launch(channel='msedge',headless=False)
+            errors=[]
+            for channel in ('msedge','chrome',None):
+                try:
+                    options={'headless':False}
+                    if channel:options['channel']=channel
+                    self.browser=self.runtime.chromium.launch(**options)
+                    break
+                except Exception as exc:
+                    errors.append(f'{channel or "Playwright Chromium"}: {exc}')
+            else:
+                raise LookupFatal('无法打开浏览器。请安装 Microsoft Edge 或 Google Chrome，或运行 python -m playwright install chromium。\n具体原因：'+errors[-1])
             self.context=self.browser.new_context()
             self.page=self.context.new_page()
         except Exception as exc:
             self.runtime.stop()
-            raise LookupFatal(f'无法打开 Microsoft Edge。请确认本机已安装 Edge。\n具体原因：{exc}') from exc
+            if isinstance(exc,LookupFatal):raise
+            raise LookupFatal(f'无法打开浏览器。请检查 Edge、Chrome 或 Playwright Chromium。\n具体原因：{exc}') from exc
         self.cache=OrderedDict();self.last_request=0
         return self
 
@@ -123,7 +134,7 @@ class BrowserFetcher:
             except (LookupFatal,PageUnavailable,LookupStopped):raise
             except Exception as exc:
                 if self.page.is_closed() or not self.browser.is_connected():
-                    raise LookupFatal('查找用的 Edge 窗口已关闭。请重新点击“自动查找邮箱”，查找期间保持窗口打开。') from exc
+                    raise LookupFatal('查找用的浏览器窗口已关闭。请重新点击“自动查找邮箱”，查找期间保持窗口打开。') from exc
                 raise PageUnavailable(f'网页读取失败：{url}\n{exc}') from exc
         self.cache[url]=html;self.cache[final]=html
         while len(self.cache)>256:self.cache.popitem(last=False)
