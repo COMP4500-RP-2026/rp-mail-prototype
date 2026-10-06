@@ -18,6 +18,9 @@ import rp_mailer as core
 import email_lookup
 from localization import tr, set_language, DisplayVar
 
+UI_FONT = 'Helvetica Neue' if sys.platform == 'darwin' else 'Microsoft YaHei UI'
+PREVIEW_FONT = 'Helvetica Neue' if sys.platform == 'darwin' else 'Segoe UI'
+
 def app_home():
     if '--self-check' in sys.argv and sys.argv.index('--self-check') + 1 < len(sys.argv):
         return Path(sys.argv[sys.argv.index('--self-check') + 1]).resolve().parent / 'rpmail-self-check-data'
@@ -90,6 +93,10 @@ class App(tk.Tk):
         self.history, self.busy, self.dirty = {}, False, False
         self.events = queue.Queue()
         self.lookup_stop = threading.Event()
+        self.auth_stop = threading.Event()
+        self.auth_pending = threading.Event()
+        self.auth_window = None
+        self.close_when_idle = False
         self.filter = '全部记录'
         self.vars = {}
         self.settings = dict(transport='outlook' if sys.platform == 'win32' else 'smtp',
@@ -117,13 +124,13 @@ class App(tk.Tk):
     def style_ui(self):
         s = ttk.Style(self)
         s.theme_use('clam')
-        s.configure('.', font=('Microsoft YaHei UI', 10), background='#f3f6fa', foreground='#253248')
+        s.configure('.', font=(UI_FONT, 10), background='#f3f6fa', foreground='#253248')
         s.configure('TButton', padding=(12, 7), background='#ffffff', borderwidth=0)
         s.map('TButton', background=[('active', '#e5efff')])
         s.configure('Primary.TButton', background='#0f6cbd', foreground='white')
         s.map('Primary.TButton', background=[('active', '#115ea3')])
         s.configure('Treeview', background='white', fieldbackground='white', rowheight=self.px(40), borderwidth=0)
-        s.configure('Treeview.Heading', background='#edf2f7', padding=8, font=('Microsoft YaHei UI', 10))
+        s.configure('Treeview.Heading', background='#edf2f7', padding=8, font=(UI_FONT, 10))
         s.map('Treeview', background=[('selected', '#dcecff')], foreground=[('selected', '#153c68')])
         s.configure('TNotebook', background='white', borderwidth=0)
         s.configure('TNotebook.Tab', padding=(20, 10))
@@ -131,8 +138,8 @@ class App(tk.Tk):
     def build(self):
         bar = tk.Frame(self, bg='#0f6cbd', height=self.px(62))
         bar.pack(fill='x'); bar.pack_propagate(False)
-        tk.Label(bar, text=tr('RP Mail'), bg='#0f6cbd', fg='white', font=('Segoe UI', 21, 'bold')).pack(side='left', padx=24)
-        tk.Label(bar, text=tr('个人研究确认'), bg='#0f6cbd', fg='#e3efff', font=('Microsoft YaHei UI', 11)).pack(side='left')
+        tk.Label(bar, text=tr('RP Mail'), bg='#0f6cbd', fg='white', font=(PREVIEW_FONT, 21, 'bold')).pack(side='left', padx=24)
+        tk.Label(bar, text=tr('个人研究确认'), bg='#0f6cbd', fg='#e3efff', font=(UI_FONT, 11)).pack(side='left')
         self.account_label = tk.Label(bar, text=tr('尚未设置个人邮箱'), bg='#0f6cbd', fg='white')
         self.account_label.pack(side='right', padx=22)
         self.language_choice=tk.StringVar(value='中文' if self.settings.get('language')=='zh' else 'English')
@@ -156,12 +163,12 @@ class App(tk.Tk):
         tk.Label(sidebar, text=tr('邮件工作区'), bg='#edf2f8', fg='#66768b', anchor='w').pack(fill='x', padx=18, pady=(24,14))
         for name in ['全部记录','待补充','可发送','已存草稿','已提交','结果待核查']:
             tk.Button(sidebar, text=tr(name), anchor='w', bg='#edf2f8', fg='#253248', activebackground='#dcecff', relief='flat',
-                      font=('Microsoft YaHei UI', 11), padx=20, pady=12, command=lambda n=name:self.set_filter(n)).pack(fill='x')
-        tk.Label(sidebar, text=tr('以个人身份联系\n使用自己的邮箱\n回复在邮箱中查看'), bg='#edf2f8', fg='#66768b', justify='left', font=('Microsoft YaHei UI', 9)).pack(side='bottom', padx=12, pady=22)
+                      font=(UI_FONT, 11), padx=20, pady=12, command=lambda n=name:self.set_filter(n)).pack(fill='x')
+        tk.Label(sidebar, text=tr('以个人身份联系\n使用自己的邮箱\n回复在邮箱中查看'), bg='#edf2f8', fg='#66768b', justify='left', font=(UI_FONT, 9)).pack(side='bottom', padx=12, pady=22)
         pane = ttk.Panedwindow(body, orient='horizontal'); pane.pack(fill='both', expand=True, padx=(0,14))
         left = ttk.Frame(pane, padding=12); right = ttk.Frame(pane, padding=12)
         pane.add(left, weight=3); pane.add(right, weight=4)
-        self.count_label = ttk.Label(left, text=tr('研究关系'), font=('Microsoft YaHei UI',14,'bold'))
+        self.count_label = ttk.Label(left, text=tr('研究关系'), font=(UI_FONT,14,'bold'))
         self.count_label.pack(anchor='w', pady=(0,12))
         list_frame = ttk.Frame(left); list_frame.pack(fill='both', expand=True)
         self.tree = ttk.Treeview(list_frame, columns=('name','title','status'), show='headings', selectmode='extended')
@@ -171,7 +178,8 @@ class App(tk.Tk):
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side='left',fill='both',expand=True); scroll.pack(side='right',fill='y')
         self.tree.bind('<<TreeviewSelect>>',self.select)
-        ttk.Label(left,text=tr('Ctrl / Shift 多选记录；发送仅处理选中项。'),foreground='#64748b').pack(anchor='w',pady=10)
+        selection_hint = '⌘ / Shift 多选记录；发送仅处理选中项。' if sys.platform == 'darwin' else 'Ctrl / Shift 多选记录；发送仅处理选中项。'
+        ttk.Label(left,text=tr(selection_hint),foreground='#64748b').pack(anchor='w',pady=10)
         actions=ttk.Frame(left);actions.pack(fill='x')
         self.action_buttons=[]
         for title, command in [('试发给自己',lambda:self.dispatch('test')),('生成草稿',lambda:self.dispatch('draft')),('发送选中项',lambda:self.dispatch('send'))]:
@@ -181,7 +189,7 @@ class App(tk.Tk):
         edit=ttk.Frame(tabs,padding=14); view=ttk.Frame(tabs,padding=14); contacts=ttk.Frame(tabs,padding=14)
         tabs.add(edit,text=tr('收件人和研究信息'));tabs.add(view,text=tr('邮件预览'))
         tabs.add(contacts,text=tr('邮箱来源与候选'))
-        ttk.Label(contacts,text=tr('项目网站上的公开联系人'),font=('Microsoft YaHei UI',13,'bold')).pack(anchor='w',pady=(0,10))
+        ttk.Label(contacts,text=tr('项目网站上的公开联系人'),font=(UI_FONT,13,'bold')).pack(anchor='w',pady=(0,10))
         ttk.Label(contacts,text=tr('优先同一论文作者，再考虑项目负责人和其他项目成员。\n仅表示公开联系信息；研究关系仍需核实。'),wraplength=480).pack(anchor='w',pady=(0,12))
         self.contact_tree=ttk.Treeview(contacts,columns=('name','email','basis'),show='headings',height=8,selectmode='browse')
         for k,label,width in [('name','姓名',120),('email','公开邮箱',200),('basis','来源依据',170)]:
@@ -206,7 +214,7 @@ class App(tk.Tk):
         self.detail_status=ttk.Label(edit,text=tr('选择左侧记录开始编辑'),wraplength=460,foreground='#64748b')
         self.detail_status.grid(row=len(LABELS)+2,column=0,columnspan=2,sticky='w',pady=12)
         self.edit_controls=[w for w in edit.winfo_children() if isinstance(w,(ttk.Entry,ttk.Checkbutton,ttk.Button))]
-        self.preview=tk.Text(view,wrap='word',font=('Segoe UI',11),relief='flat',padx=16,pady=16,bg='white',fg='#263448')
+        self.preview=tk.Text(view,wrap='word',font=(PREVIEW_FONT,11),relief='flat',padx=16,pady=16,bg='white',fg='#263448')
         vs=ttk.Scrollbar(view,command=self.preview.yview);self.preview.configure(yscrollcommand=vs.set)
         vs.pack(side='right',fill='y');self.preview.pack(fill='both',expand=True)
         self.status=DisplayVar(value='就绪 · 尚未发送任何邮件')
@@ -427,7 +435,7 @@ class App(tk.Tk):
         if self.busy:return
         win=tk.Toplevel(self);win.title(tr('个人邮箱设置'));win.geometry(f'{self.px(680)}x{self.px(700)}');win.transient(self);win.grab_set()
         frame=ttk.Frame(win,padding=20);frame.pack(fill='both',expand=True)
-        ttk.Label(frame,text=tr('选择发信方式并配置已获准使用的个人邮箱'),font=('Microsoft YaHei UI',13,'bold')).pack(anchor='w',pady=(0,10))
+        ttk.Label(frame,text=tr('选择发信方式并配置已获准使用的个人邮箱'),font=(UI_FONT,13,'bold')).pack(anchor='w',pady=(0,10))
         ttk.Label(frame,text=tr('Windows 可使用经典版 Outlook；macOS 和 Windows 均可使用 SMTP。软件不保存邮箱密码。'),wraplength=600).pack(anchor='w',pady=(0,10))
         ttk.Label(frame,text=tr('发信方式')).pack(anchor='w')
         methods={'Classic Outlook (Windows)':'outlook','SMTP (macOS / Windows)':'smtp'}
@@ -474,7 +482,9 @@ class App(tk.Tk):
             candidate.update(transport=methods[method.get()],smtp_security=security.get(),auth_mode=auth_methods[auth.get()])
             if candidate['transport']=='smtp' and not candidate['smtp_username']:
                 candidate['smtp_username']=candidate['sender_email']
-            try:core.validate_config(candidate)
+            try:
+                core.validate_config(candidate)
+                if candidate['transport'] == 'smtp':core.validate_smtp_port(candidate)
             except Exception as exc:messagebox.showerror(tr('请检查填写内容'),tr(str(exc)),parent=win);return
             self.settings=candidate
             (DATA/'settings.json').write_text(json.dumps(candidate,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -519,13 +529,46 @@ class App(tk.Tk):
 
     def start_worker(self,command,rows,config):
         self.busy=True
+        self.auth_stop.clear()
+        self.auth_pending.clear()
         for w in self.edit_controls:w.configure(state='disabled')
         self.status.set('正在处理… 请保持应用打开，等待结果。')
         for b in self.action_buttons:b.config(state='disabled')
         threading.Thread(target=self.worker,args=(command,rows,config),daemon=True).start()
 
     def auth_prompt(self,uri,code):
+        self.auth_pending.set()
         self.events.put(('auth',(uri,code)))
+
+    def auth_done(self):
+        self.auth_pending.clear()
+        self.events.put(('auth_done',None))
+
+    def cancel_sign_in(self):
+        if self.auth_pending.is_set():
+            self.auth_stop.set()
+        self.finish_auth()
+        if self.auth_stop.is_set():
+            self.status.set('正在取消 Microsoft 登录…')
+
+    def finish_auth(self):
+        if self.auth_window is not None:
+            self.auth_window.destroy()
+            self.auth_window = None
+        self.stop_button.config(text=tr('停止查找'),command=self.lookup_stop.set,state='disabled')
+
+    def show_auth_prompt(self,uri,code):
+        self.stop_button.config(text=tr('取消登录'),command=self.cancel_sign_in,state='normal')
+        self.status.set('等待 Microsoft 登录；可点击“取消登录”。')
+        win=tk.Toplevel(self)
+        win.title(tr('Microsoft 登录'))
+        win.transient(self)
+        frame=ttk.Frame(win,padding=20);frame.pack(fill='both',expand=True)
+        ttk.Label(frame,text=tr(f'请在打开的网页输入代码 {code} 完成登录。\n\n登录网址：{uri}'),wraplength=420).pack(pady=(0,12))
+        ttk.Button(frame,text=tr('取消登录'),command=self.cancel_sign_in).pack(anchor='e')
+        win.protocol('WM_DELETE_WINDOW',self.cancel_sign_in)
+        self.auth_window=win
+        webbrowser.open(uri)
 
     def worker(self,command,rows,config):
         com=None
@@ -534,7 +577,7 @@ class App(tk.Tk):
                 import pythoncom
                 com=pythoncom;com.CoInitialize()
             if command=='check':
-                with core.connect(config,on_auth=self.auth_prompt):pass
+                with core.connect(config,on_auth=self.auth_prompt,stop_event=self.auth_stop,on_auth_done=self.auth_done):pass
                 result='已连接经典版 Outlook，并找到指定个人邮箱。未创建或发送邮件。' if config.get('transport')=='outlook' else 'SMTP 登录与连接成功。未发送邮件。'
                 self.events.put(('ok',result))
                 return
@@ -543,23 +586,28 @@ class App(tk.Tk):
             config_path.write_text(json.dumps(config),encoding='utf-8')
             args=SimpleNamespace(command=command,input=DATA/'batch.csv',config=config_path,output=DATA/'validation',limit=len(rows),to=config['sender_email'])
             log=io.StringIO()
-            with redirect_stdout(log):core.run(args,on_auth=self.auth_prompt)
+            with redirect_stdout(log):core.run(args,on_auth=self.auth_prompt,stop_event=self.auth_stop,on_auth_done=self.auth_done)
             (DATA/'last_operation.txt').write_text(log.getvalue(),encoding='utf-8')
             text={'test':'已将 1 封测试邮件交给发件服务，收件人为你自己的邮箱。',
                   'draft':'草稿处理完成，请在 Outlook 草稿箱中检查并手动发送。',
                   'send':'选中邮件处理完成，请在邮箱中检查已发送、退信和回复。'}[command]
             self.events.put(('ok',text))
+        except core.SignInCancelled:self.events.put(('cancelled','Microsoft 登录已取消，未发送邮件。'))
         except Exception as exc:self.events.put(('error',str(exc)))
         finally:
+            self.auth_pending.clear()
             if com:com.CoUninitialize()
 
     def poll(self):
         try:
             kind,text=self.events.get_nowait()
             if kind=='auth':
-                uri,code=text
-                webbrowser.open(uri)
-                messagebox.showinfo(tr('Microsoft 登录'),tr(f'请在打开的网页输入代码 {code} 完成登录。\n\n登录网址：{uri}'))
+                if self.auth_pending.is_set() and not self.auth_stop.is_set():
+                    uri,code=text
+                    self.show_auth_prompt(uri,code)
+                self.after(100,self.poll);return
+            if kind=='auth_done':
+                self.finish_auth()
                 self.after(100,self.poll);return
             if kind=='lookup_progress':
                 self.status.set(text)
@@ -575,17 +623,27 @@ class App(tk.Tk):
                 self.after(50,self.poll);return
             self.busy=False
             for w in self.edit_controls:w.configure(state='normal')
-            self.stop_button.config(state='disabled')
+            self.finish_auth()
             for b in self.action_buttons:b.config(state='normal')
             self.update_account_label()
+            if kind=='cancelled' and self.close_when_idle:
+                self.close_when_idle=False
+                self.save_current(refresh=False)
+                self.destroy()
+                return
+            self.close_when_idle=False
             self.refresh();self.render_preview();self.status.set(text)
-            if kind=='error':messagebox.showerror(tr('操作未完成'),tr(text+'\n\n若已开始处理邮件，请先检查 Outlook，再决定是否重试。'))
-            else:messagebox.showinfo(tr('处理结果'),tr(text))
+            if kind=='error':messagebox.showerror(tr('操作未完成'),tr(text+'\n\n若已开始处理邮件，请先检查邮箱的已发送、发件箱和退信，再决定是否重试。'))
+            elif kind!='cancelled':messagebox.showinfo(tr('处理结果'),tr(text))
         except queue.Empty:pass
         self.after(150,self.poll)
 
     def close_app(self):
         if self.busy:
+            if self.auth_pending.is_set() or self.auth_stop.is_set():
+                self.close_when_idle=True
+                self.cancel_sign_in()
+                return
             messagebox.showinfo(tr('正在处理'),tr('请等待本批操作结束后关闭，避免发送结果不确定。'));return
         self.save_current(refresh=False);self.destroy()
 

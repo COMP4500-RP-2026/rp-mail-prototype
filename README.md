@@ -56,7 +56,7 @@ If Edge or Chrome is installed, no separate Playwright browser download is requi
 4. Check the relationship evidence and email preview.
 5. Check the sending connection and send a test email to yourself before sending reviewed records. Outlook drafts are available only with the Windows Outlook method.
 
-For Microsoft 365 SMTP, ask the mailbox administrator for an approved public-client application ID and tenant ID, and whether SMTP AUTH is allowed for the mailbox. Enter these in the SMTP account settings. Device sign-in displays a code and opens the Microsoft sign-in page. The default server settings are `smtp.office365.com`, port `587`, and STARTTLS; use your provider's settings for another service. A successful SMTP submission does not prove delivery.
+For Microsoft 365 SMTP, confirm with Eric and ANU IT that SMTP AUTH, device-code sign-in, and the `SMTP.Send` permission are allowed for the chosen mailbox and application. Ask IT for an approved public-client application ID and tenant ID. Device sign-in displays a code and opens the Microsoft sign-in page; **Cancel sign-in** stops waiting without sending. A successful sign-in is reused for later checks and sends while the app remains open. Tokens are kept in memory only and are not saved across restarts. The default server settings are `smtp.office365.com`, port `587`, and STARTTLS; use your provider's settings for another service. A successful SMTP submission does not prove delivery.
 
 For password-based SMTP, set the named environment variable before starting the app. A Finder-launched macOS app does not inherit Terminal-only environment variables, so Microsoft sign-in is the practical choice for that launch method. Do not put passwords in `settings.json`.
 

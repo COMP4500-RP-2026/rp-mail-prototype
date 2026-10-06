@@ -21,8 +21,8 @@ python3 -m venv .venv
 ## 配置发信账号
 
 1. 在“Account settings”填写姓名、发件邮箱，并选择 SMTP。
-2. 使用 Microsoft 365 时，向邮箱管理员确认 SMTP AUTH 是否允许，并取得获准使用的 public-client application ID 和 tenant ID。填入服务器、端口、登录邮箱、租户 ID 和应用 ID。默认 `smtp.office365.com:587`、STARTTLS 仅适用于相应 Microsoft 365 配置。
-3. 点击“Check sending connection”。Microsoft 登录会显示一次性代码并打开登录网页；完成登录后，连接检查不会发送邮件。
+2. 使用 Microsoft 365 时，先与 Eric 和 ANU IT 确认所用邮箱及应用获准使用 SMTP AUTH、设备码登录与 `SMTP.Send` 权限，并取得 public-client application ID 和 tenant ID。填入服务器、端口、登录邮箱、租户 ID 和应用 ID。默认 `smtp.office365.com:587`、STARTTLS 仅适用于相应 Microsoft 365 配置。
+3. 点击“Check sending connection”。Microsoft 登录会显示一次性代码并打开登录网页；完成登录后，连接检查不会发送邮件。若不想继续，可点击“Cancel sign-in”，无需等待代码过期。同一次程序运行内会复用登录；关闭软件后需要重新登录，令牌不会写入磁盘。
 4. 导入数据、核对收件人和推荐依据，先用“Test to myself”检查邮件，再处理获准联系的记录。
 
 如果邮件服务支持密码式 SMTP，可选择该方式，并在启动程序前设置界面所填名称对应的环境变量。软件只保存环境变量名称，不保存密码。从 Finder 启动的 `.app` 通常不会继承 Terminal 中设置的变量。

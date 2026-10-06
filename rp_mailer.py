@@ -20,6 +20,11 @@ BASE = Path(__file__).resolve().parent
 EXTRA = ['researcher_name', 'researcher_email', 'publication_date', 'project_name',
          'funder', 'project_start_date', 'project_end_date', 'suggestion_reason', 'reviewed']
 SUBJECT = 'Potential RP+ project–output relationship'
+SMTP_SCOPE = ['https://outlook.office.com/SMTP.Send']
+_MSAL_APPS = {}
+
+class SignInCancelled(RuntimeError):
+    pass
 
 def read_rows(path, encoding='utf-8-sig'):
     with open(path, encoding=encoding, newline='') as f:
@@ -61,6 +66,14 @@ def validate(row):
         return 'Unexpected RP+ output URL'
     return ''
 
+def validate_smtp_port(config):
+    try:
+        port = int(config.get('smtp_port', ''))
+    except (TypeError, ValueError):
+        raise ValueError('smtp_port must be between 1 and 65535')
+    if not 1 <= port <= 65535:
+        raise ValueError('smtp_port must be between 1 and 65535')
+
 def validate_config(config, sending=False):
     for field in ['sender_email', 'sender_name']:
         if not config.get(field) or '\n' in config[field] or '\r' in config[field]:
@@ -76,12 +89,7 @@ def validate_config(config, sending=False):
             return
         if not config.get('smtp_host') or not config.get('smtp_username'):
             raise ValueError('Configure smtp_host and smtp_username')
-        try:
-            port = int(config.get('smtp_port', ''))
-        except (TypeError, ValueError):
-            raise ValueError('smtp_port must be between 1 and 65535')
-        if not 1 <= port <= 65535:
-            raise ValueError('smtp_port must be between 1 and 65535')
+        validate_smtp_port(config)
         if config.get('smtp_security') not in ('starttls', 'ssl'):
             raise ValueError('smtp_security must be starttls or ssl')
         if config.get('auth_mode') == 'microsoft':
@@ -190,28 +198,50 @@ class OutlookTransport:
     def __exit__(self, *args):
         self.close()
 
-def connect(config, on_auth=None):
+def connect(config, on_auth=None, stop_event=None, on_auth_done=None):
     if config.get('transport') == 'outlook':
         return OutlookTransport(config)
+    def stopped():
+        return stop_event is not None and stop_event.is_set()
+    if stopped():
+        raise SignInCancelled('Microsoft sign-in cancelled. No email was sent.')
     token = None
     if config.get('auth_mode') == 'microsoft':
         try:
             import msal
         except ImportError:
             raise ValueError('Install Microsoft login dependency: python -m pip install msal')
-        app = msal.PublicClientApplication(config['client_id'],
-            authority='https://login.microsoftonline.com/' + config['tenant_id'])
-        flow = app.initiate_device_flow(scopes=['https://outlook.office.com/SMTP.Send'])
-        if 'user_code' not in flow:
-            raise ValueError('Microsoft sign-in could not start. Check application configuration with IT.')
-        if on_auth:
-            on_auth(flow['verification_uri'], flow['user_code'])
-        else:
-            print(flow['message'], flush=True)
-        result = app.acquire_token_by_device_flow(flow)
+        key = (config['tenant_id'], config['client_id'])
+        app = _MSAL_APPS.get(key)
+        if app is None:
+            app = msal.PublicClientApplication(config['client_id'],
+                authority='https://login.microsoftonline.com/' + config['tenant_id'],
+                token_cache=msal.SerializableTokenCache())
+            _MSAL_APPS[key] = app
+        result = None
+        for account in app.get_accounts(username=config['smtp_username']):
+            result = app.acquire_token_silent(SMTP_SCOPE, account=account)
+            if result and result.get('access_token'):
+                break
+        if not result or not result.get('access_token'):
+            if stopped():
+                raise SignInCancelled('Microsoft sign-in cancelled. No email was sent.')
+            flow = app.initiate_device_flow(scopes=SMTP_SCOPE)
+            if 'user_code' not in flow:
+                raise ValueError('Microsoft sign-in could not start. Check application configuration with IT.')
+            if on_auth:
+                on_auth(flow['verification_uri'], flow['user_code'])
+            else:
+                print(flow['message'], flush=True)
+            result = app.acquire_token_by_device_flow(flow,
+                exit_condition=lambda current: stopped() or current.get('expires_at', 0) < time.time())
+        if stopped():
+            raise SignInCancelled('Microsoft sign-in cancelled. No email was sent.')
         token = result.get('access_token')
         if not token:
             raise ValueError('Microsoft sign-in failed. Check consent and school access policy.')
+        if on_auth_done:
+            on_auth_done()
     context = ssl.create_default_context()
     if config['smtp_security'] == 'ssl':
         smtp = smtplib.SMTP_SSL(config['smtp_host'], int(config['smtp_port']), timeout=30, context=context)
@@ -231,7 +261,7 @@ def connect(config, on_auth=None):
         raise
     return smtp
 
-def run(args, on_auth=None):
+def run(args, on_auth=None, stop_event=None, on_auth_done=None):
     _, rows = read_rows(args.input)
     config = json.loads(Path(args.config).read_text(encoding='utf-8-sig'))
     validate_config(config, args.command in ('send', 'test', 'draft'))
@@ -269,7 +299,9 @@ def run(args, on_auth=None):
         msg = message(eligible[0], config)
         msg.replace_header('To', args.to)
         msg.replace_header('Subject', '[TEST] ' + str(msg['Subject']))
-        with connect(config, on_auth=on_auth) as smtp:
+        with connect(config, on_auth=on_auth, stop_event=stop_event, on_auth_done=on_auth_done) as smtp:
+            if stop_event is not None and stop_event.is_set():
+                raise SignInCancelled('Microsoft sign-in cancelled. No email was sent.')
             smtp.send_message(msg, from_addr=config['sender_email'], to_addrs=[args.to])
         print('One test message sent. Production history unchanged.')
         return
@@ -290,7 +322,9 @@ def run(args, on_auth=None):
                     continue
                 msg = message(row, config)
                 if smtp is None:
-                    smtp = connect(config, on_auth=on_auth)
+                    smtp = connect(config, on_auth=on_auth, stop_event=stop_event, on_auth_done=on_auth_done)
+                    if stop_event is not None and stop_event.is_set():
+                        raise SignInCancelled('Microsoft sign-in cancelled. No email was sent.')
                 try:
                     db.execute('INSERT INTO history VALUES (?, ?, ?, ?, ?)',
                                (key, row['researcher_email'], 'pending', datetime.now(timezone.utc).isoformat(), str(msg['Message-ID'])))
@@ -313,7 +347,10 @@ def run(args, on_auth=None):
         finally:
             if smtp is not None:
                 smtp.close()
-        print(f'{count} messages processed. Drafts require manual sending in Outlook; submission does not guarantee delivery.')
+        if args.command == 'draft':
+            print(f'{count} Outlook drafts created. Send them manually; saving a draft does not deliver it.')
+        else:
+            print(f'{count} messages submitted. Submission does not guarantee delivery.')
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
