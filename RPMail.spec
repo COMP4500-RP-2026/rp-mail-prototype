@@ -1,16 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
 
 a = Analysis(
     ['desktop_app.py'],
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=['win32timezone', 'win32com.client', 'pythoncom', 'openpyxl'],
+    hiddenimports=['openpyxl', 'playwright.sync_api', 'msal'] +
+                  (['win32timezone', 'win32com.client', 'pythoncom'] if sys.platform == 'win32' else []),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['PyQt5', 'PyQt6', 'PySide6', 'numpy', 'pandas', 'matplotlib', 'scipy', 'IPython', 'msal'],
+    excludes=['PyQt5', 'PyQt6', 'PySide6', 'numpy', 'pandas', 'matplotlib', 'scipy', 'IPython'],
     noarchive=False,
     optimize=0,
 )
@@ -42,3 +44,6 @@ coll = COLLECT(
     upx_exclude=[],
     name='RPMail',
 )
+
+if sys.platform == 'darwin':
+    app = BUNDLE(coll, name='RPMail.app')
